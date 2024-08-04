@@ -138,41 +138,152 @@ def run_fp_growth(data, min_support=0.01, min_confidence=0.1):
     rules['consequents'] = rules['consequents'].apply(lambda x: list(x))
     return rules
 
-def run_eclat(data, min_support=0.01, min_confidence=0.1):
+def run_eclat(data, min_support=0.01, min_combination=1, max_combination=None):
     def get_support(itemset, transactions):
         return np.sum(np.all(transactions[:, itemset], axis=1)) / transactions.shape[0]
 
     transactions = data.values
-    itemsets = [[i] for i in range(transactions.shape[1])]
+    num_items = transactions.shape[1]
+    
+    if max_combination is None:
+        max_combination = num_items
+
+    itemsets = [[i] for i in range(num_items)]
     frequent_itemsets = []
 
-    while itemsets:
+    current_combination = 1
+    while itemsets and current_combination <= max_combination:
         next_itemsets = []
         for itemset in itemsets:
             support = get_support(itemset, transactions)
             if support >= min_support:
                 frequent_itemsets.append((itemset, support))
-                for i in range(itemset[-1] + 1, transactions.shape[1]):
-                    next_itemsets.append(itemset + [i])
+                if current_combination < max_combination:
+                    for i in range(itemset[-1] + 1, num_items):
+                        next_itemsets.append(itemset + [i])
         itemsets = next_itemsets
+        current_combination += 1
 
-    rules = []
-    for itemset, support in frequent_itemsets:
-        for i in range(1, len(itemset)):
-            for antecedent in itertools.combinations(itemset, i):
-                consequent = list(set(itemset) - set(antecedent))
-                antecedent_support = get_support(list(antecedent), transactions)
-                confidence = support / antecedent_support
-                if confidence >= min_confidence:
-                    rules.append({
-                        'antecedents': list(data.columns[list(antecedent)]),
-                        'consequents': list(data.columns[consequent]),
-                        'support': support,
-                        'confidence': confidence,
-                        'lift': confidence / get_support(consequent, transactions)
-                    })
+    frequent_itemsets = [fi for fi in frequent_itemsets if len(fi[0]) >= min_combination]
 
-    return pd.DataFrame(rules)
+    frequent_itemsets_named = [(data.columns[itemset].tolist(), support) for itemset, support in frequent_itemsets]
+
+    return pd.DataFrame(frequent_itemsets_named, columns=['Itemset', 'Support'])
+
+def generate_itemsets_bar_chart(frequent_itemsets):
+    frequent_itemsets['Itemset'] = frequent_itemsets['Itemset'].apply(lambda x: ', '.join(x))
+    fig = px.bar(
+        frequent_itemsets,
+        x='Itemset',
+        y='Support',
+        labels={'Itemset': 'Conjunto de Itens', 'Support': 'Suporte'},
+        title='Itemsets Frequentes Gerados pelo ECLAT'
+    )
+    return fig
+
+def generate_heatmap_itemsets(frequent_itemsets, data):
+    itemsets = frequent_itemsets['Itemset'].apply(lambda x: tuple(sorted(x.split(', '))))
+    unique_items = sorted(set(itertools.chain.from_iterable(itemsets)))
+    item_to_idx = {item: idx for idx, item in enumerate(unique_items)}
+
+    itemset_matrix = np.zeros((len(frequent_itemsets), len(unique_items)))
+
+    for idx, row in frequent_itemsets.iterrows():
+        for item in row['Itemset'].split(', '):
+            itemset_matrix[idx, item_to_idx[item]] = row['Support']
+
+    fig = px.imshow(
+        itemset_matrix,
+        labels=dict(x="Items", y="Itemsets"),
+        x=unique_items,
+        y=[', '.join(sorted(itemset)) for itemset in itemsets],
+        title='Mapa de Calor dos Itemsets Frequentes Gerados pelo ECLAT'
+    )
+    return fig
+
+def generate_scatter_plot_eclat(frequent_itemsets):
+    fig = px.scatter(
+        frequent_itemsets,
+        x='Itemset',
+        y='Support',
+        labels={'Itemset': 'Conjunto de Itens', 'Support': 'Suporte'},
+        title='Dispersão dos Itemsets Frequentes Gerados pelo ECLAT'
+    )
+    return fig
+
+def generate_network_graph_eclat(frequent_itemsets):
+    G = nx.Graph()
+
+    for idx, row in frequent_itemsets.iterrows():
+        items = row['Itemset'].split(', ')
+        for pair in itertools.combinations(items, 2):
+            if G.has_edge(pair[0], pair[1]):
+                G[pair[0]][pair[1]]['weight'] += row['Support']
+            else:
+                G.add_edge(pair[0], pair[1], weight=row['Support'])
+
+    pos = nx.spring_layout(G, k=2)
+
+    edge_x = []
+    edge_y = []
+    for edge in G.edges(data=True):
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_x.append(x0)
+        edge_x.append(x1)
+        edge_x.append(None)
+        edge_y.append(y0)
+        edge_y.append(y1)
+        edge_y.append(None)
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=0.5, color='#888'),
+        hoverinfo='none',
+        mode='lines')
+
+    node_x = []
+    node_y = []
+    for node in G.nodes():
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        text=list(G.nodes()),
+        hoverinfo='text',
+        marker=dict(
+            showscale=True,
+            colorscale='YlGnBu',
+            size=10,
+            colorbar=dict(
+                thickness=15,
+                title='Suporte',
+                xanchor='left',
+                titleside='right'
+            ),
+            line_width=2))
+
+    fig = go.Figure(data=[edge_trace, node_trace],
+                    layout=go.Layout(
+                        title='Gráfico de Rede dos Itemsets Frequentes Gerados pelo ECLAT',
+                        titlefont_size=16,
+                        showlegend=False,
+                        hovermode='closest',
+                        margin=dict(b=20, l=5, r=5, t=40),
+                        annotations=[dict(
+                            text="",
+                            showarrow=False,
+                            xref="paper", yref="paper"
+                        )],
+                        xaxis=dict(showgrid=False, zeroline=False),
+                        yaxis=dict(showgrid=False, zeroline=False))
+                    )
+    return fig
+
+
 
 def generate_rules_graph(rules):
     if 'support' in rules.columns and 'confidence' in rules.columns and 'lift' in rules.columns:
@@ -348,22 +459,39 @@ if uploaded_file is not None:
     )
 
     min_support = st.slider("Suporte Mínimo", 0.01, 0.5, 0.01)
-    min_confidence = st.slider("Confiança Mínima", 0.1, 1.0, 0.1)
+
+    if algorithm == "Apriori":
+        min_confidence = st.slider("Confiança Mínima", 0.1, 1.0, 0.1)
+    elif algorithm == "Eclat":
+        min_combination = st.slider("Combinação Mínima", 1, 10, 1)
+        max_combination = st.slider("Combinação Máxima", 1, 10, 1)
+    elif algorithm == "FP-Growth":
+        min_confidence = st.slider("Confiança Mínima", 0.1, 1.0, 0.1)
+    
 
     if st.button("Executar Algoritmo"):
         try:
             if algorithm == "Apriori":
                 rules = run_apriori(data, min_support, min_confidence)
+                st.dataframe(rules)
+                st.plotly_chart(generate_rules_graph(rules))
+                st.plotly_chart(generate_parallel_coordinates_plot(rules))
+                st.plotly_chart(generate_heatmap(rules))
+                st.plotly_chart(generate_network_graph(rules))
             elif algorithm == "Eclat":
-                rules = run_eclat(data, min_support, min_confidence)
+                frequent_itemsets = run_eclat(data, min_support, min_combination, max_combination)
+                st.dataframe(frequent_itemsets)
+                st.plotly_chart(generate_itemsets_bar_chart(frequent_itemsets))
+                st.plotly_chart(generate_heatmap_itemsets(frequent_itemsets, data))
+                st.plotly_chart(generate_scatter_plot_eclat(frequent_itemsets))
+                st.plotly_chart(generate_network_graph_eclat(frequent_itemsets))
             elif algorithm == "FP-Growth":
                 rules = run_fp_growth(data, min_support, min_confidence)
-
-            st.dataframe(rules)
-            st.plotly_chart(generate_rules_graph(rules))
-            st.plotly_chart(generate_parallel_coordinates_plot(rules))
-            st.plotly_chart(generate_heatmap(rules))
-            st.plotly_chart(generate_network_graph(rules))
+                st.dataframe(rules)
+                st.plotly_chart(generate_rules_graph(rules))
+                st.plotly_chart(generate_parallel_coordinates_plot(rules))
+                st.plotly_chart(generate_heatmap(rules))
+                st.plotly_chart(generate_network_graph(rules))
         except ValueError as e:
             st.error(e)
     
